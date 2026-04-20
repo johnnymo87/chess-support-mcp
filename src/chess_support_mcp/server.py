@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+import io
+
 import chess
+import chess.pgn
 from mcp.server.fastmcp import FastMCP
 
 
@@ -74,6 +77,76 @@ class GameState:
         self.board.push(move)
         self.san_history.append(san)
         return {"accepted": True}
+
+    def load_pgn_text(self, pgn: str) -> Dict[str, Any]:
+        """Parse a PGN string and replay it atomically into this game.
+
+        On success: mutates self.board / self.san_history to the post-PGN state
+        and returns a dict with accepted=True plus metadata.
+        On failure: leaves self unchanged and returns accepted=False plus a
+        reason. Never partially applies.
+        """
+        try:
+            game = chess.pgn.read_game(io.StringIO(pgn))
+        except Exception as exc:  # noqa: BLE001 — io.StringIO raises TypeError on non-str; chess.pgn.read_game itself returns None rather than raising, but catch broadly for safety
+            return {
+                "accepted": False,
+                "reason": "parse_error",
+                "parse_error": str(exc),
+                "moves_applied": 0,
+            }
+
+        if game is None:
+            return {
+                "accepted": False,
+                "reason": "empty_pgn",
+                "moves_applied": 0,
+            }
+
+        # python-chess collects SAN-parsing failures in game.errors rather than
+        # raising. Crucially, valid moves *before* the bad SAN are still
+        # present in game.mainline_moves() — so this check MUST come before
+        # the empty-mainline check below, or we would silently apply a
+        # partial replay on PGNs with an illegal move mid-stream.
+        if game.errors:
+            return {
+                "accepted": False,
+                "reason": "illegal_move",
+                "parse_error": str(game.errors[0]),
+                "moves_applied": 0,
+            }
+
+        mainline = list(game.mainline_moves())
+        if not mainline:
+            return {
+                "accepted": False,
+                "reason": "empty_pgn",
+                "moves_applied": 0,
+            }
+
+        # Build the new state in locals first. Only swap into self at the end.
+        new_board = game.board()  # respects [FEN ...] [SetUp "1"] if present
+        starting_fen = new_board.fen()
+        new_san_history: List[str] = []
+        for move in mainline:
+            # Compute SAN *before* pushing, to match add_move_uci's convention.
+            new_san_history.append(new_board.san(move))
+            new_board.push(move)
+
+        # game.headers is a live MutableMapping; copy to a plain dict for
+        # JSON serializability and to decouple from the game object's lifetime.
+        headers = dict(game.headers)
+
+        # Commit.
+        self.board = new_board
+        self.san_history = new_san_history
+
+        return {
+            "accepted": True,
+            "moves_applied": len(mainline),
+            "starting_fen": starting_fen,
+            "headers": headers,
+        }
 
     def is_move_legal(self, uci: str) -> Dict[str, Any]:
         try:
@@ -331,6 +404,65 @@ def add_move(uci: str) -> Dict[str, Any]:
             response["expected_turn"] = move_outcome["expected_turn"]
         return response
 
+    response["moves"] = _GAME.all_moves()
+    response["moves_detailed"] = _GAME.all_moves_detailed()
+    return response
+
+
+@server.tool()
+def load_pgn(pgn: str) -> Dict[str, Any]:
+    """Load a full PGN string, replacing the current game with its position.
+
+    Parameters:
+    - pgn: string containing a PGN (headers optional; movetext required).
+
+    Behavior:
+    - Parses with python-chess's PGN reader and replays the mainline moves.
+    - Variations (inside parentheses) are ignored; only the mainline is played.
+    - [FEN "..."] headers are respected: replay starts from the declared
+      position rather than the standard start. The [SetUp "1"] header is
+      recognized but not required.
+    - Atomic: the current game is only replaced if the entire PGN replays
+      cleanly. On any failure the current game is preserved.
+
+    Returns (in result):
+    - On success: {
+        accepted: true,
+        moves_applied: int,
+        starting_fen: str,
+        status: Status,
+        moves: [uci, ...],
+        moves_detailed: [{ply, uci, san, side}, ...],
+        headers: {tag: value, ...},
+      }
+    - On failure: {
+        accepted: false,
+        reason: "parse_error" | "empty_pgn" | "illegal_move",
+        parse_error: str (when applicable),
+        moves_applied: 0,
+        status: <unchanged>,
+      }
+
+    Notes:
+    - This tool validates and replays; it does not suggest or score moves.
+    - If you need to append a single move in SAN to an existing game, this is
+      not the right tool — use add_move with a UCI string.
+    """
+
+    outcome = _GAME.load_pgn_text(pgn)
+    response: Dict[str, Any] = {
+        "accepted": bool(outcome.get("accepted")),
+        "moves_applied": outcome.get("moves_applied", 0),
+        "status": _GAME.status(),
+    }
+    if not response["accepted"]:
+        response["reason"] = outcome["reason"]
+        if "parse_error" in outcome:
+            response["parse_error"] = outcome["parse_error"]
+        return response
+
+    response["starting_fen"] = outcome["starting_fen"]
+    response["headers"] = outcome["headers"]
     response["moves"] = _GAME.all_moves()
     response["moves_detailed"] = _GAME.all_moves_detailed()
     return response

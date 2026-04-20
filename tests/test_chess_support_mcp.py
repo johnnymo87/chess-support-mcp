@@ -349,3 +349,126 @@ async def test_material_after_promotion():
         )
         # White has 1 queen, black has 2, so diff = -1.
         assert s["material_diff"]["Q"] == -1
+
+
+@pytest.mark.anyio
+async def test_load_pgn_happy_path():
+    # Short legal opening. Covers headers, SAN with piece moves, and a capture.
+    pgn = (
+        '[Event "Test"]\n'
+        '[Site "?"]\n'
+        '[Date "2026.04.19"]\n'
+        '[Round "1"]\n'
+        '[White "Alice"]\n'
+        '[Black "Bob"]\n'
+        '[Result "*"]\n'
+        "\n"
+        "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Bxc6 dxc6 *\n"
+    )
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        # Dirty the game first to prove load_pgn replaces state, not appends.
+        await session.call_tool("add_move", {"uci": "d2d4"})
+
+        resp = await session.call_tool("load_pgn", {"pgn": pgn})
+        out = resp.structuredContent["result"]
+        # Replacement verified: d2d4 must not appear in the new game's history.
+        assert "d2d4" not in out["moves"], (
+            "load_pgn must replace state, not append to it"
+        )
+        assert out["accepted"] is True
+        assert out["moves_applied"] == 8
+        # Standard start position FEN
+        assert out["starting_fen"].startswith(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
+        )
+        assert out["status"]["ply_count"] == 8
+        assert out["status"]["last_move_san"] == "dxc6"
+        assert out["moves"][:3] == ["e2e4", "e7e5", "g1f3"]
+        # SAN history populated in moves_detailed
+        assert out["moves_detailed"][0]["san"] == "e4"
+        assert out["moves_detailed"][2]["san"] == "Nf3"
+        assert out["moves_detailed"][6]["san"] == "Bxc6"  # piece capture
+        assert out["moves_detailed"][-1]["san"] == "dxc6"  # pawn recapture
+        assert out["moves_detailed"][0]["side"] == "white"
+        assert out["moves_detailed"][1]["side"] == "black"
+        # Headers surface through
+        assert out["headers"]["White"] == "Alice"
+        assert out["headers"]["Black"] == "Bob"
+
+
+@pytest.mark.anyio
+async def test_load_pgn_empty_rejected():
+    # Garbage / empty input must not silently reset the game.
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        await session.call_tool("add_move", {"uci": "e2e4"})
+        pre = (await session.call_tool("get_status", {})).structuredContent["result"]
+        assert pre["ply_count"] == 1
+
+        resp = await session.call_tool("load_pgn", {"pgn": "garbage with no moves"})
+        out = resp.structuredContent["result"]
+        assert out["accepted"] is False
+        assert out["reason"] == "empty_pgn"
+        assert out["moves_applied"] == 0
+        # Game must be unchanged — compare against pre to prove atomicity.
+        assert out["status"]["ply_count"] == pre["ply_count"]
+        assert out["status"]["last_move_uci"] == pre["last_move_uci"]
+        assert out["status"]["fen"] == pre["fen"]
+
+
+@pytest.mark.anyio
+async def test_load_pgn_illegal_move_rejected():
+    # PGN with an illegal SAN mid-game. python-chess stops at the bad move and
+    # populates game.errors. We must reject the whole PGN — not partially apply.
+    pgn = (
+        '[Event "Bad"]\n[Result "*"]\n\n'
+        "1. e4 e5 2. Ke3 *\n"  # Ke3 is illegal: king on e1 cannot reach e3 in one step
+    )
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        await session.call_tool("add_move", {"uci": "d2d4"})
+        pre = (await session.call_tool("get_status", {})).structuredContent["result"]
+        assert pre["ply_count"] == 1
+
+        resp = await session.call_tool("load_pgn", {"pgn": pgn})
+        out = resp.structuredContent["result"]
+        assert out["accepted"] is False
+        assert out["reason"] == "illegal_move"
+        assert "Ke3" in out["parse_error"]
+        assert out["moves_applied"] == 0
+        # Game must be unchanged — no partial replay. Compare against pre.
+        assert out["status"]["ply_count"] == pre["ply_count"]
+        assert out["status"]["last_move_uci"] == pre["last_move_uci"]
+        assert out["status"]["fen"] == pre["fen"]
+
+
+@pytest.mark.anyio
+async def test_load_pgn_with_fen_startpos():
+    # PGN with [FEN ...] + [SetUp "1"] headers must be replayed from that FEN,
+    # not from the standard start. Black-to-move middlegame fragment.
+    pgn = (
+        '[Event "Fragment"]\n'
+        '[SetUp "1"]\n'
+        '[FEN "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"]\n'
+        '[Result "*"]\n'
+        "\n"
+        "2. Nf3 Nc6 *\n"
+    )
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        resp = await session.call_tool("load_pgn", {"pgn": pgn})
+        out = resp.structuredContent["result"]
+        assert out["accepted"] is True
+        assert out["moves_applied"] == 2
+        assert out["starting_fen"].startswith(
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR"
+        )
+        # After Nf3 Nc6 from that position, knights are on f3 and c6.
+        assert out["status"]["pieces"]["f3"] == "N"
+        assert out["status"]["pieces"]["c6"] == "n"
+        assert out["moves_detailed"][0]["san"] == "Nf3"
+        assert out["moves_detailed"][1]["san"] == "Nc6"
+        assert (
+            out["status"]["side_to_move"] == "white"
+        )  # after Nf3 + Nc6, white to move
