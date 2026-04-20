@@ -43,6 +43,127 @@ def _sort_ray_from_king(king_sq: int, ray_set: "chess.SquareSet") -> List[int]:
     return sorted(ray_set, key=projection)
 
 
+def _status_from_board(
+    board: chess.Board,
+    san_history: List[str] | None = None,
+) -> Dict[str, Any]:
+    """Build a Status dict from a chess.Board.
+
+    Shared by GameState.status() (live self.board) and peek (an isolated
+    copy). san_history is optional: when absent (or shorter than move_stack),
+    last_move_san falls back to None. Peek passes a list it built against the
+    copy; GameState passes its own self.san_history.
+
+    The length guard on san_history is a deliberate tightening of the old
+    GameState.status() behaviour: the old code returned san_history[-1]
+    whenever san_history was truthy, regardless of whether it was the right
+    length. This helper returns None when history is shorter than the move
+    stack, which is the correct answer for that edge case. Do not simplify
+    the guard back to the old form.
+
+    Factored from the original GameState.status() so both callers produce
+    identical Status shapes without duplication.
+    """
+    fen = board.fen()
+    parts = fen.split()
+    last_move_uci = board.move_stack[-1].uci() if board.move_stack else None
+    if san_history and len(san_history) >= len(board.move_stack) and board.move_stack:
+        last_move_san = san_history[-1]
+    else:
+        last_move_san = None
+
+    white = {k: 0 for k in PIECE_KEYS}
+    black = {k: 0 for k in PIECE_KEYS}
+    for piece in board.piece_map().values():
+        sym_upper = piece.symbol().upper()
+        if sym_upper == "K":
+            continue
+        if piece.color == chess.WHITE:
+            white[sym_upper] += 1
+        else:
+            black[sym_upper] += 1
+    material = {"white": white, "black": black}
+    material_diff = {k: white[k] - black[k] for k in PIECE_KEYS}
+
+    pieces = {
+        chess.square_name(sq): piece.symbol()
+        for sq, piece in board.piece_map().items()
+    }
+
+    checkers = []
+    for sq in board.checkers():
+        piece = board.piece_at(sq)
+        checkers.append(
+            {
+                "square": chess.square_name(sq),
+                "piece": piece.symbol() if piece else "?",
+            }
+        )
+
+    absolute_pins: List[Dict[str, Any]] = []
+    for color in (chess.WHITE, chess.BLACK):
+        king_sq = board.king(color)
+        if king_sq is None:
+            continue
+        color_name = "white" if color == chess.WHITE else "black"
+        for square, piece in board.piece_map().items():
+            if piece.color != color:
+                continue
+            if not board.is_pinned(color, square):
+                continue
+            ray_set = board.pin(color, square)
+            ray_squares = _sort_ray_from_king(king_sq, ray_set)
+            pinned_idx = ray_squares.index(square)
+            pinner_sq = next(
+                (
+                    sq
+                    for sq in ray_squares[pinned_idx + 1 :]
+                    if board.piece_at(sq) is not None
+                    and board.piece_at(sq).color != color
+                ),
+                None,
+            )
+            if pinner_sq is None:
+                continue
+            pinner_piece = board.piece_at(pinner_sq)
+            absolute_pins.append(
+                {
+                    "color": color_name,
+                    "pinned_square": chess.square_name(square),
+                    "pinned_piece": piece.symbol(),
+                    "king_square": chess.square_name(king_sq),
+                    "pinner_square": chess.square_name(pinner_sq),
+                    "pinner_piece": pinner_piece.symbol() if pinner_piece else "?",
+                    "ray": [chess.square_name(sq) for sq in ray_squares],
+                }
+            )
+
+    return {
+        "fen": fen,
+        "side_to_move": "white" if board.turn else "black",
+        "fullmove_number": board.fullmove_number,
+        "halfmove_clock": board.halfmove_clock,
+        "ply_count": len(board.move_stack),
+        "castling_rights": parts[2] if len(parts) >= 3 else None,
+        "en_passant_square": parts[3] if len(parts) >= 4 else None,
+        "last_move_uci": last_move_uci,
+        "last_move_san": last_move_san,
+        "who_moved_last": (
+            "white" if (len(board.move_stack) - 1) % 2 == 0 else "black"
+        )
+        if board.move_stack
+        else None,
+        "is_check": board.is_check(),
+        "is_game_over": board.is_game_over(),
+        "result": board.result(claim_draw=True) if board.is_game_over() else None,
+        "pieces": pieces,
+        "checkers": checkers,
+        "absolute_pins": absolute_pins,
+        "material": material,
+        "material_diff": material_diff,
+    }
+
+
 @dataclass
 class GameState:
     """Holds a single in-memory chess game state."""
@@ -302,42 +423,7 @@ class GameState:
         return pins
 
     def status(self) -> Dict[str, Any]:
-        fen = self.board.fen()
-        parts = fen.split()
-        last_move_uci = (
-            self.board.move_stack[-1].uci() if self.board.move_stack else None
-        )
-        last_move_san = self.san_history[-1] if self.san_history else None
-        material = self.material_counts()
-        material_diff = {
-            k: material["white"][k] - material["black"][k] for k in PIECE_KEYS
-        }
-        return {
-            "fen": fen,
-            "side_to_move": "white" if self.board.turn else "black",
-            "fullmove_number": self.board.fullmove_number,
-            "halfmove_clock": self.board.halfmove_clock,
-            "ply_count": len(self.board.move_stack),
-            "castling_rights": parts[2] if len(parts) >= 3 else None,
-            "en_passant_square": parts[3] if len(parts) >= 4 else None,
-            "last_move_uci": last_move_uci,
-            "last_move_san": last_move_san,
-            "who_moved_last": (
-                "white" if (len(self.board.move_stack) - 1) % 2 == 0 else "black"
-            )
-            if self.board.move_stack
-            else None,
-            "is_check": self.board.is_check(),
-            "is_game_over": self.board.is_game_over(),
-            "result": self.board.result(claim_draw=True)
-            if self.board.is_game_over()
-            else None,
-            "pieces": self.pieces_map(),
-            "checkers": self.checkers_info(),
-            "absolute_pins": self.absolute_pins_info(),
-            "material": material,
-            "material_diff": material_diff,
-        }
+        return _status_from_board(self.board, self.san_history)
 
 
 server = FastMCP(
