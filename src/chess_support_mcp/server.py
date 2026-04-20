@@ -409,6 +409,47 @@ def last_moves_detailed(n: int = 1) -> List[Dict[str, Any]]:
 
 
 @server.tool()
+def get_attackers_to(square: str) -> Dict[str, Any]:
+    """Return all pieces attacking the given square, by color.
+
+    Parameters:
+    - square: algebraic square name like "e4".
+
+    Returns:
+    - { square, white: [{square, piece}, ...], black: [{square, piece}, ...] }
+    - On parse error: { square, parse_error: str, white: [], black: [] }
+
+    IMPORTANT: This is the static attack map. Pinned pieces are still counted
+    as attackers, and x-ray attacks through the king are not considered. This
+    tool does not answer "who can legally capture on this square right now" —
+    to answer that, filter list_legal_moves_detailed() by destination square.
+    """
+
+    try:
+        sq = chess.parse_square(square)
+    except ValueError as exc:
+        return {"square": square, "parse_error": str(exc), "white": [], "black": []}
+
+    def format_attackers(color: chess.Color) -> List[Dict[str, str]]:
+        entries: List[Dict[str, str]] = []
+        for s in _GAME.board.attackers(color, sq):
+            piece = _GAME.board.piece_at(s)
+            entries.append(
+                {
+                    "square": chess.square_name(s),
+                    "piece": piece.symbol() if piece else "?",
+                }
+            )
+        return entries
+
+    return {
+        "square": square,
+        "white": format_attackers(chess.WHITE),
+        "black": format_attackers(chess.BLACK),
+    }
+
+
+@server.tool()
 def list_legal_moves_detailed() -> List[Dict[str, Any]]:
     """Return all legal moves in the current position, sorted by UCI ascending.
 

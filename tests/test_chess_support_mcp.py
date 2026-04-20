@@ -263,3 +263,53 @@ async def test_list_legal_moves_detailed_sorted():
         ).structuredContent["result"]
         ucis = [m["uci"] for m in result]
         assert ucis == sorted(ucis)
+
+
+@pytest.mark.anyio
+async def test_get_attackers_to_basic():
+    # After 1.e4 e5 2.Nf3, White's Nf3 attacks e5; no Black piece attacks e5.
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        for uci in ["e2e4", "e7e5", "g1f3"]:
+            await session.call_tool("add_move", {"uci": uci})
+        result = (
+            await session.call_tool("get_attackers_to", {"square": "e5"})
+        ).structuredContent["result"]
+        assert result["square"] == "e5"
+        white_squares = {a["square"] for a in result["white"]}
+        assert "f3" in white_squares
+        # Confirm piece info is included
+        nf3 = next(a for a in result["white"] if a["square"] == "f3")
+        assert nf3["piece"] == "N"
+
+
+@pytest.mark.anyio
+async def test_get_attackers_to_includes_pinned():
+    # Reuse the Qe5-pins-Be7 position from test_absolute_pins_detected.
+    # The pinned Be7 still attacks d6 and f6 and so on; it must appear in
+    # the static attack map despite being pinned (documents the semantic
+    # trap called out in the tool's docstring).
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        for uci in ["e2e4", "e7e5", "d1h5", "g8f6", "h5e5", "f8e7"]:
+            await session.call_tool("add_move", {"uci": uci})
+        result = (
+            await session.call_tool("get_attackers_to", {"square": "d6"})
+        ).structuredContent["result"]
+        black_squares = {a["square"] for a in result["black"]}
+        assert "e7" in black_squares, (
+            "Pinned bishop on e7 should still appear as static-map attacker of d6"
+        )
+
+
+@pytest.mark.anyio
+async def test_get_attackers_to_parse_error():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        result = (
+            await session.call_tool("get_attackers_to", {"square": "zz9"})
+        ).structuredContent["result"]
+        assert result["square"] == "zz9"
+        assert "parse_error" in result
+        assert result["white"] == []
+        assert result["black"] == []
