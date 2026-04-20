@@ -8,7 +8,9 @@ An MCP server that manages the state of a chess game for LLMs/agents. It intenti
 - Get last N moves
 - Machine-friendly board JSON (square-to-piece map) in `get_status()`
 - Check if a move is legal
-- Get status (FEN, whose turn, check, game over, result)
+- Enumerate all legal moves (UCI + SAN) in the current position
+- Query the static attack map for any square
+- Get status (FEN, whose turn, check, game over, result, checkers, absolute pins, material counts)
 
 ### Requirements
 
@@ -128,9 +130,11 @@ Claude Desktop configuration (in its JSON settings), using `mcpServers`:
 ### Tools (Methods)
 
 - `create_or_reset_game()` → Reset to initial position. Returns `status` (with `pieces` map), and `moves`.
-- `get_status()` → Returns FEN; `side_to_move` (white/black); `fullmove_number`; `halfmove_clock`; `ply_count`; `last_move_uci`; `last_move_san`; `who_moved_last`; check flags; `is_game_over`; `result` when over; and a `pieces` map for machine reasoning.
+- `get_status()` → Returns FEN; `side_to_move` (white/black); `fullmove_number`; `halfmove_clock`; `ply_count`; `last_move_uci`; `last_move_san`; `who_moved_last`; check flags; `is_game_over`; `result` when over; a `pieces` map for machine reasoning; `checkers` (list of `{square, piece}` for pieces giving check); `absolute_pins` (list of pin objects, each with `color`, `pinned_square`, `pinned_piece`, `king_square`, `pinner_square`, `pinner_piece`, and `ray` ordered from king outward); `material` (per-color piece counts `{Q,R,B,N,P}`, excluding kings, uncapped for promotions); and `material_diff` (per-piece `white[k] - black[k]`).
 - `add_move(uci: str)` → Apply a move if legal (e.g., `e2e4`, `g1f3`, promotion like `e7e8q`). Returns `{ accepted, status }` and, on success, also `moves` and `moves_detailed`. On failure returns `{ accepted:false, reason:"illegal"|"parse_error", expected_turn? }` with `status` reflecting the unchanged position.
 - `is_legal(uci: str)` → Check legality of a UCI move in the current position.
+- `list_legal_moves_detailed()` → All legal moves in the current position as `[{uci, san}, ...]`, sorted by UCI ascending. Empty list in checkmate or stalemate.
+- `get_attackers_to(square: str)` → Static attack map for a square: `{ square, white: [{square, piece}, ...], black: [{square, piece}, ...] }`. **Note:** pinned pieces still count as attackers; this is the raw attack map, not a legality oracle. To ask "who can legally capture here right now", filter `list_legal_moves_detailed()` by destination square instead.
 - `list_moves()` → All moves in UCI made so far.
 - `list_moves_detailed()` → All moves with `ply`, `side`, `uci`, `san`.
 - `last_moves(n: int=1)` → Last N moves in UCI.
