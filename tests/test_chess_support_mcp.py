@@ -472,3 +472,26 @@ async def test_load_pgn_with_fen_startpos():
         assert (
             out["status"]["side_to_move"] == "white"
         )  # after Nf3 + Nc6, white to move
+
+
+@pytest.mark.anyio
+async def test_load_pgn_scholars_mate_with_result():
+    # Scholar's Mate PGN with '+' / '#' markers and a result tag. Mirrors the
+    # shape of PGNs that Chess.com / Lichess actually export.
+    pgn = (
+        '[Event "Scholar test"]\n'
+        '[Result "1-0"]\n'
+        "\n"
+        "1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6?? 4. Qxf7# 1-0\n"
+    )
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        resp = await session.call_tool("load_pgn", {"pgn": pgn})
+        out = resp.structuredContent["result"]
+        assert out["accepted"] is True
+        assert out["moves_applied"] == 7
+        assert out["status"]["is_game_over"] is True
+        assert out["status"]["result"] == "1-0"
+        assert out["status"]["last_move_san"] == "Qxf7#"
+        # Checkers should report the queen on f7.
+        assert out["status"]["checkers"] == [{"square": "f7", "piece": "Q"}]
