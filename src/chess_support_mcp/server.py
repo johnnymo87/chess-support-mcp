@@ -116,6 +116,18 @@ class GameState:
                 black[sym_upper] += 1
         return {"white": white, "black": black}
 
+    def checkers_info(self) -> List[Dict[str, str]]:
+        result: List[Dict[str, str]] = []
+        for sq in self.board.checkers():
+            piece = self.board.piece_at(sq)
+            result.append(
+                {
+                    "square": chess.square_name(sq),
+                    "piece": piece.symbol() if piece else "?",
+                }
+            )
+        return result
+
     def status(self) -> Dict[str, Any]:
         fen = self.board.fen()
         parts = fen.split()
@@ -148,6 +160,7 @@ class GameState:
             if self.board.is_game_over()
             else None,
             "pieces": self.pieces_map(),
+            "checkers": self.checkers_info(),
             "material": material,
             "material_diff": material_diff,
         }

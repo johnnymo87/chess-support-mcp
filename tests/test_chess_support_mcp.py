@@ -137,3 +137,33 @@ async def test_material_after_capture():
         assert s["material"]["white"]["P"] == 8
         assert s["material"]["black"]["P"] == 7
         assert s["material_diff"]["P"] == 1
+
+
+@pytest.mark.anyio
+async def test_checkers_zero():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        s = (await session.call_tool("get_status", {})).structuredContent["result"]
+        assert s["checkers"] == []
+
+
+@pytest.mark.anyio
+async def test_checkers_one():
+    # Scholar's Mate: Qxf7#. After 7. Qxf7+, Black's king is in check from the queen.
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        for uci in ["e2e4", "e7e5", "f1c4", "b8c6", "d1h5", "g8f6", "h5f7"]:
+            await session.call_tool("add_move", {"uci": uci})
+        s = (await session.call_tool("get_status", {})).structuredContent["result"]
+        assert s["is_check"] is True
+        assert s["checkers"] == [{"square": "f7", "piece": "Q"}]
+
+
+@pytest.mark.anyio
+@pytest.mark.skip(
+    reason="Double-check setup via legal play from initial position is awkward; "
+    "deferred until/unless we add a test-only FEN loader. "
+    "See docs/plans/2026-04-19-enriched-status-design.md Test 9."
+)
+async def test_checkers_two():
+    pass
