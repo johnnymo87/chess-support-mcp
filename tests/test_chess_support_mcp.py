@@ -222,3 +222,44 @@ async def test_relative_pin_not_reported():
             assert p["pinned_square"] != "f3", (
                 "Nf3 is only relatively pinned (to Qd1), should not appear in absolute_pins"
             )
+
+
+@pytest.mark.anyio
+async def test_list_legal_moves_detailed_initial():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        result = (
+            await session.call_tool("list_legal_moves_detailed", {})
+        ).structuredContent["result"]
+        assert len(result) == 20
+        assert {"uci": "e2e4", "san": "e4"} in result
+        # Sorted by UCI ascending
+        ucis = [m["uci"] for m in result]
+        assert ucis == sorted(ucis)
+
+
+@pytest.mark.anyio
+async def test_list_legal_moves_detailed_checkmate():
+    # Fool's Mate
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        for uci in ["f2f3", "e7e5", "g2g4", "d8h4"]:
+            await session.call_tool("add_move", {"uci": uci})
+        status = (await session.call_tool("get_status", {})).structuredContent["result"]
+        assert status["is_game_over"] is True
+        result = (
+            await session.call_tool("list_legal_moves_detailed", {})
+        ).structuredContent["result"]
+        assert result == []
+
+
+@pytest.mark.anyio
+async def test_list_legal_moves_detailed_sorted():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        await session.call_tool("add_move", {"uci": "e2e4"})
+        result = (
+            await session.call_tool("list_legal_moves_detailed", {})
+        ).structuredContent["result"]
+        ucis = [m["uci"] for m in result]
+        assert ucis == sorted(ucis)

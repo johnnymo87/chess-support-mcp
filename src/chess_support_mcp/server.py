@@ -409,6 +409,25 @@ def last_moves_detailed(n: int = 1) -> List[Dict[str, Any]]:
 
 
 @server.tool()
+def list_legal_moves_detailed() -> List[Dict[str, Any]]:
+    """Return all legal moves in the current position, sorted by UCI ascending.
+
+    Each item: { uci: string, san: string }.
+
+    Notes:
+    - Ordering: sorted by uci ascending (stable, deterministic).
+    - Empty list in checkmate or stalemate.
+    - This tool enumerates legality; it does not suggest or score moves.
+    """
+
+    moves = [
+        {"uci": m.uci(), "san": _GAME.board.san(m)} for m in _GAME.board.legal_moves
+    ]
+    moves.sort(key=lambda x: x["uci"])
+    return moves
+
+
+@server.tool()
 def board_ascii() -> str:
     """Return an ASCII representation of the board from White's perspective.
 
