@@ -495,3 +495,26 @@ async def test_load_pgn_scholars_mate_with_result():
         assert out["status"]["last_move_san"] == "Qxf7#"
         # Checkers should report the queen on f7.
         assert out["status"]["checkers"] == [{"square": "f7", "piece": "Q"}]
+
+
+@pytest.mark.anyio
+async def test_load_pgn_trailing_garbage_silently_dropped():
+    # python-chess quirk: completely unparseable SAN tokens at the END of the
+    # movetext (just before the result marker) are silently dropped without
+    # landing in game.errors. This test documents that behavior so a future
+    # refactor that adds a stricter SAN validator will deliberately break this
+    # test rather than silently changing the contract.
+    # See improving-the-fact-server SKILL and replaying-a-pgn SKILL for the
+    # user-facing caveat.
+    pgn = '[Event "Trailing garbage"]\n[Result "*"]\n\n1. e4 e5 2. Zz99 *\n'
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        resp = await session.call_tool("load_pgn", {"pgn": pgn})
+        out = resp.structuredContent["result"]
+        # The first two moves are applied; Zz99 is silently ignored by python-chess.
+        assert out["accepted"] is True
+        assert out["moves_applied"] == 2
+        assert out["moves"] == ["e2e4", "e7e5"]
+        # No illegal-SAN error raised — the quirk's essence is that game.errors stays empty.
+        # (We don't assert on game.errors directly since it's not in our response shape;
+        # the fact that accepted is True implies game.errors was empty.)
