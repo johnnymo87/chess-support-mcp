@@ -78,6 +78,31 @@ class GameState:
         self.san_history.append(san)
         return {"accepted": True}
 
+    def undo_last_move(self) -> Dict[str, Any]:
+        """Pop the most recent move off the stack, reverting the position.
+
+        Uses python-chess's board.pop(), which authoritatively restores
+        castling rights, en-passant square, halfmove clock, side-to-move,
+        is_check / is_game_over, and the board itself. The parallel
+        san_history list is popped in lockstep so last_move_san and
+        list_moves_detailed stay correct.
+        """
+        if not self.board.move_stack:
+            return {"accepted": False, "reason": "no_moves"}
+        move = self.board.pop()
+        san = self.san_history.pop() if self.san_history else None
+        ply = len(self.board.move_stack) + 1
+        side = "white" if (ply - 1) % 2 == 0 else "black"
+        return {
+            "accepted": True,
+            "undone": {
+                "uci": move.uci(),
+                "san": san,
+                "ply": ply,
+                "side": side,
+            },
+        }
+
     def load_pgn_text(self, pgn: str) -> Dict[str, Any]:
         """Parse a PGN string and replay it atomically into this game.
 
@@ -404,6 +429,51 @@ def add_move(uci: str) -> Dict[str, Any]:
             response["expected_turn"] = move_outcome["expected_turn"]
         return response
 
+    response["moves"] = _GAME.all_moves()
+    response["moves_detailed"] = _GAME.all_moves_detailed()
+    return response
+
+
+@server.tool()
+def undo_last_move() -> Dict[str, Any]:
+    """Revert the most recent move, restoring the prior position.
+
+    Parameters: (none)
+
+    Returns (in result):
+    - On success: {
+        accepted: true,
+        status: Status,                 # full get_status() shape, post-undo
+        moves: [uci, ...],              # updated history
+        moves_detailed: [...],          # updated history
+        undone: { uci, san, ply, side } # what disappeared
+      }
+    - On failure (empty stack): {
+        accepted: false,
+        reason: "no_moves",
+        status: Status                  # unchanged
+      }
+
+    Notes:
+    - Uses python-chess board.pop(), which restores castling rights,
+      en-passant square, halfmove clock, side-to-move, and check/game-over
+      flags exactly. No manual reconstruction.
+    - Can unwind moves that were replayed by load_pgn. The floor is
+      whatever starting position the PGN declared (standard start unless
+      the PGN had a [FEN ...] header).
+    - This tool mutates state; it does not suggest or score moves.
+    """
+
+    outcome = _GAME.undo_last_move()
+    response: Dict[str, Any] = {
+        "accepted": bool(outcome.get("accepted")),
+        "status": _GAME.status(),
+    }
+    if not response["accepted"]:
+        response["reason"] = outcome["reason"]
+        return response
+
+    response["undone"] = outcome["undone"]
     response["moves"] = _GAME.all_moves()
     response["moves_detailed"] = _GAME.all_moves_detailed()
     return response

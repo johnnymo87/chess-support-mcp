@@ -518,3 +518,127 @@ async def test_load_pgn_trailing_garbage_silently_dropped():
         # No illegal-SAN error raised — the quirk's essence is that game.errors stays empty.
         # (We don't assert on game.errors directly since it's not in our response shape;
         # the fact that accepted is True implies game.errors was empty.)
+
+
+@pytest.mark.anyio
+async def test_undo_last_move_reverts_position():
+    async with run_client() as session:
+        tools = await session.list_tools()
+        names = {t.name for t in tools.tools}
+        assert "undo_last_move" in names
+
+        await session.call_tool("create_or_reset_game", {})
+        await session.call_tool("add_move", {"uci": "e2e4"})
+        await session.call_tool("add_move", {"uci": "e7e5"})
+
+        resp = await session.call_tool("undo_last_move", {})
+        out = resp.structuredContent["result"]
+
+        assert out["accepted"] is True
+        assert out["undone"] == {
+            "uci": "e7e5",
+            "san": "e5",
+            "ply": 2,
+            "side": "black",
+        }
+
+        status = out["status"]
+        assert status["last_move_san"] == "e4"
+        assert status["last_move_uci"] == "e2e4"
+        assert status["side_to_move"] == "black"
+        assert status["ply_count"] == 1
+
+        assert out["moves"] == ["e2e4"]
+        assert len(out["moves_detailed"]) == 1
+        assert out["moves_detailed"][0]["san"] == "e4"
+        assert out["moves_detailed"][0]["ply"] == 1
+        assert out["moves_detailed"][0]["side"] == "white"
+
+
+@pytest.mark.anyio
+async def test_undo_last_move_empty_stack():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+
+        resp = await session.call_tool("undo_last_move", {})
+        out = resp.structuredContent["result"]
+
+        assert out["accepted"] is False
+        assert out["reason"] == "no_moves"
+        assert out["status"]["ply_count"] == 0
+        assert out["status"]["side_to_move"] == "white"
+        assert "undone" not in out
+
+        # Idempotent on empty: calling again is the same response.
+        resp2 = await session.call_tool("undo_last_move", {})
+        out2 = resp2.structuredContent["result"]
+        assert out2["accepted"] is False
+        assert out2["reason"] == "no_moves"
+        assert out2["status"]["ply_count"] == 0
+
+
+@pytest.mark.anyio
+async def test_undo_last_move_restores_castling_and_en_passant_rights():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+
+        # Advance to a position where white's e5-pawn is ready to capture
+        # en passant: 1.e4 e6 2.e5. After these three moves, EP = "-" because
+        # no black pawn is adjacent to the white pawn on e5 yet.
+        for uci in ["e2e4", "e7e6", "e4e5"]:
+            await session.call_tool("add_move", {"uci": uci})
+
+        # Snapshot the FEN before the next push.
+        # Expected: rnbqkbnr/pppp1ppp/4p3/4P3/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 2
+        status_before = (
+            await session.call_tool("get_status", {})
+        ).structuredContent["result"]
+        fen_before = status_before["fen"]
+
+        # Push f7f5: black's f-pawn double-pushes adjacent to white's e5-pawn,
+        # creating EP square f6 in the FEN. This actually exercises the EP
+        # field: fen_before has EP="-", post-push FEN has EP="f6".
+        await session.call_tool("add_move", {"uci": "f7f5"})
+        undo = await session.call_tool("undo_last_move", {})
+
+        status_after = undo.structuredContent["result"]["status"]
+        fen_after = status_after["fen"]
+
+        # Full FEN equality: castling rights, en-passant square, halfmove
+        # clock, fullmove number, side-to-move, and board layout all match.
+        assert fen_after == fen_before
+
+
+@pytest.mark.anyio
+async def test_undo_last_move_after_load_pgn():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+
+        pgn = "1. e4 e5 2. Nf3 Nc6 *"
+        load = await session.call_tool("load_pgn", {"pgn": pgn})
+        assert load.structuredContent["result"]["accepted"] is True
+        assert load.structuredContent["result"]["status"]["ply_count"] == 4
+
+        # Undo twice: back to 1. e4 e5
+        await session.call_tool("undo_last_move", {})
+        resp = await session.call_tool("undo_last_move", {})
+        out = resp.structuredContent["result"]
+        assert out["accepted"] is True
+        assert out["status"]["ply_count"] == 2
+        assert out["status"]["last_move_san"] == "e5"
+        assert len(out["moves_detailed"]) == 2
+
+        # Undo two more times: empty stack, back to standard start.
+        await session.call_tool("undo_last_move", {})
+        resp2 = await session.call_tool("undo_last_move", {})
+        out2 = resp2.structuredContent["result"]
+        assert out2["accepted"] is True
+        assert out2["status"]["ply_count"] == 0
+        assert out2["status"]["side_to_move"] == "white"
+        assert out2["status"]["last_move_san"] is None
+
+        # One more undo → no_moves.
+        resp3 = await session.call_tool("undo_last_move", {})
+        out3 = resp3.structuredContent["result"]
+        assert out3["accepted"] is False
+        assert out3["reason"] == "no_moves"
