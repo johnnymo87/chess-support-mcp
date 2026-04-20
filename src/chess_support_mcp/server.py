@@ -10,6 +10,36 @@ from mcp.server.fastmcp import FastMCP
 PIECE_KEYS = ("Q", "R", "B", "N", "P")
 
 
+def _sort_ray_from_king(king_sq: int, ray_set: "chess.SquareSet") -> List[int]:
+    """Order squares in ray_set (collinear with king_sq) from king outward.
+
+    board.pin() returns a SquareSet (unordered bitboard) representing the
+    rank, file, or diagonal of a pin. Consumers want a stable order; we
+    impose: king first, then monotonically along the pin line.
+    """
+    squares = [sq for sq in ray_set if sq != king_sq]
+    if not squares:
+        return [king_sq]
+    kf, kr = chess.square_file(king_sq), chess.square_rank(king_sq)
+    # Use the nearest-by-Chebyshev-distance square to fix direction robustly.
+    nearest = min(
+        squares,
+        key=lambda s: max(
+            abs(chess.square_file(s) - kf),
+            abs(chess.square_rank(s) - kr),
+        ),
+    )
+    nf, nr = chess.square_file(nearest), chess.square_rank(nearest)
+    df = 0 if nf == kf else (1 if nf > kf else -1)
+    dr = 0 if nr == kr else (1 if nr > kr else -1)
+
+    def projection(sq: int) -> int:
+        f, r = chess.square_file(sq), chess.square_rank(sq)
+        return (f - kf) * df + (r - kr) * dr
+
+    return sorted(ray_set, key=projection)
+
+
 @dataclass
 class GameState:
     """Holds a single in-memory chess game state."""
@@ -128,6 +158,51 @@ class GameState:
             )
         return result
 
+    def absolute_pins_info(self) -> List[Dict[str, Any]]:
+        pins: List[Dict[str, Any]] = []
+        for color in (chess.WHITE, chess.BLACK):
+            king_sq = self.board.king(color)
+            if king_sq is None:
+                continue
+            color_name = "white" if color == chess.WHITE else "black"
+            for square, piece in self.board.piece_map().items():
+                if piece.color != color:
+                    continue
+                if not self.board.is_pinned(color, square):
+                    continue
+                ray_set = self.board.pin(color, square)
+                ray_squares = _sort_ray_from_king(king_sq, ray_set)
+                # The pinner is the first enemy piece on the ray beyond the
+                # pinned piece (further from the king). board.pin() returns
+                # the full rank/file/diagonal mask, which may include unrelated
+                # enemy pieces (e.g. the enemy king on the same file); walking
+                # outward from the pinned piece avoids picking them up.
+                pinned_idx = ray_squares.index(square)
+                pinner_sq = next(
+                    (
+                        sq
+                        for sq in ray_squares[pinned_idx + 1 :]
+                        if self.board.piece_at(sq) is not None
+                        and self.board.piece_at(sq).color != color
+                    ),
+                    None,
+                )
+                if pinner_sq is None:
+                    continue  # defensive; is_pinned() shouldn't return True without a pinner
+                pinner_piece = self.board.piece_at(pinner_sq)
+                pins.append(
+                    {
+                        "color": color_name,
+                        "pinned_square": chess.square_name(square),
+                        "pinned_piece": piece.symbol(),
+                        "king_square": chess.square_name(king_sq),
+                        "pinner_square": chess.square_name(pinner_sq),
+                        "pinner_piece": pinner_piece.symbol() if pinner_piece else "?",
+                        "ray": [chess.square_name(sq) for sq in ray_squares],
+                    }
+                )
+        return pins
+
     def status(self) -> Dict[str, Any]:
         fen = self.board.fen()
         parts = fen.split()
@@ -161,6 +236,7 @@ class GameState:
             else None,
             "pieces": self.pieces_map(),
             "checkers": self.checkers_info(),
+            "absolute_pins": self.absolute_pins_info(),
             "material": material,
             "material_diff": material_diff,
         }

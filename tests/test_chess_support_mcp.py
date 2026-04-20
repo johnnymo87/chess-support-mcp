@@ -167,3 +167,58 @@ async def test_checkers_one():
 )
 async def test_checkers_two():
     pass
+
+
+@pytest.mark.anyio
+async def test_absolute_pins_empty_initial():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        s = (await session.call_tool("get_status", {})).structuredContent["result"]
+        assert s["absolute_pins"] == []
+
+
+@pytest.mark.anyio
+async def test_absolute_pins_detected():
+    # After 1.e4 e5 2.Qh5 Nf6 3.Qxe5+ Be7, White's queen on e5 absolutely pins
+    # Black's Be7 to Ke8 along the e-file. Verified manually via python-chess.
+    # NOTE: the more "classical" Bb5 pin (1.e4 e5 2.Nf3 Nc6 3.Bb5) is NOT an
+    # absolute pin because the d7 pawn blocks the bishop's line of sight to
+    # the king. See docs/plans/2026-04-19-enriched-status-design.md note on
+    # Test 4 for the fixture rationale.
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        for uci in ["e2e4", "e7e5", "d1h5", "g8f6", "h5e5", "f8e7"]:
+            await session.call_tool("add_move", {"uci": uci})
+        s = (await session.call_tool("get_status", {})).structuredContent["result"]
+        pins = s["absolute_pins"]
+        assert len(pins) == 1
+        p = pins[0]
+        assert p["color"] == "black"
+        assert p["pinned_square"] == "e7"
+        assert p["pinned_piece"] == "b"
+        assert p["king_square"] == "e8"
+        assert p["pinner_square"] == "e5"
+        assert p["pinner_piece"] == "Q"
+        # Ray is the e-file; ordered from king (e8) outward along the pin line.
+        assert p["ray"][0] == "e8"
+        assert "e7" in p["ray"]
+        assert "e5" in p["ray"]
+        # board.pin() returns the full rank/file/diagonal mask, so the e-file
+        # ray extends all the way to e1.
+        assert p["ray"][-1] == "e1"
+
+
+@pytest.mark.anyio
+async def test_relative_pin_not_reported():
+    # After 1.d4 d5 2.Bf4 Nc6 3.Nf3 Bg4, Bg4 relatively pins Nf3 to Qd1
+    # (through the queen, not the king). No king involvement => no absolute
+    # pin. The defensive assertion: Nf3 must NOT appear in absolute_pins.
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        for uci in ["d2d4", "d7d5", "c1f4", "b8c6", "g1f3", "c8g4"]:
+            await session.call_tool("add_move", {"uci": uci})
+        s = (await session.call_tool("get_status", {})).structuredContent["result"]
+        for p in s["absolute_pins"]:
+            assert p["pinned_square"] != "f3", (
+                "Nf3 is only relatively pinned (to Qd1), should not appear in absolute_pins"
+            )
