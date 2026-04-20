@@ -224,6 +224,68 @@ class GameState:
             },
         }
 
+    def peek(self, uci_sequence: List[str]) -> Dict[str, Any]:
+        """Apply a UCI sequence to an isolated copy; return the result without
+        mutating self.
+
+        Atomicity is structural: self.board and self.san_history are never
+        touched. We operate on self.board.copy() (a cheap bitboard memcpy in
+        python-chess) and discard it at the end. No path through this method
+        mutates self.
+
+        Success: {accepted: True, peeked_status: Status, applied: [...]}.
+        Failure envelopes mirror add_move's vocabulary: reason is one of
+        "empty_sequence", "parse_error", or "illegal", with failed_at_index
+        pointing 0-based into the caller's original uci_sequence.
+        """
+        if not uci_sequence:
+            return {"accepted": False, "reason": "empty_sequence"}
+
+        board_copy = self.board.copy()
+        applied: List[Dict[str, Any]] = []
+
+        for index, uci in enumerate(uci_sequence):
+            try:
+                move = chess.Move.from_uci(uci)
+            except Exception as exc:  # noqa: BLE001 — match add_move_uci's breadth
+                return {
+                    "accepted": False,
+                    "reason": "parse_error",
+                    "parse_error": str(exc),
+                    "failed_at_index": index,
+                    "failed_uci": uci,
+                }
+
+            if move not in board_copy.legal_moves:
+                return {
+                    "accepted": False,
+                    "reason": "illegal",
+                    "failed_at_index": index,
+                    "failed_uci": uci,
+                    "expected_turn": "white" if board_copy.turn else "black",
+                }
+
+            # Compute SAN + ply/side BEFORE pushing, so they describe the move
+            # just played (matches add_move_uci's convention).
+            san = board_copy.san(move)
+            ply = len(board_copy.move_stack) + 1
+            side = "white" if board_copy.turn else "black"
+            board_copy.push(move)
+            applied.append({"uci": uci, "san": san, "ply": ply, "side": side})
+
+        # Build peeked_status from the copy. If the original board had prior
+        # moves, board_copy.move_stack still contains them, but our local
+        # `applied` list only covers the peeked moves. Concatenate the
+        # original san_history with the peek SANs so _status_from_board's
+        # length-guard resolves last_move_san correctly.
+        peek_san_history = [entry["san"] for entry in applied]
+        full_san_history = list(self.san_history) + peek_san_history
+        return {
+            "accepted": True,
+            "peeked_status": _status_from_board(board_copy, full_san_history),
+            "applied": applied,
+        }
+
     def load_pgn_text(self, pgn: str) -> Dict[str, Any]:
         """Parse a PGN string and replay it atomically into this game.
 
@@ -562,6 +624,71 @@ def undo_last_move() -> Dict[str, Any]:
     response["undone"] = outcome["undone"]
     response["moves"] = _GAME.all_moves()
     response["moves_detailed"] = _GAME.all_moves_detailed()
+    return response
+
+
+@server.tool()
+def peek(uci_sequence: List[str]) -> Dict[str, Any]:
+    """Apply a sequence of UCI moves to a copy of the board, return the
+    resulting status without mutating state.
+
+    Parameters:
+    - uci_sequence: list of UCI strings (e.g., ["e2e4", "e7e5", "g1f3"]).
+      Each is applied in order to an isolated copy of the current board.
+      Must be non-empty.
+
+    Returns (in result):
+    - On success: {
+        accepted: true,
+        peeked_status: Status,       # full get_status() shape, from the copy
+        applied: [{uci, san, ply, side}, ...],  # moves actually played, in order
+        status: Status,              # UNCHANGED original, same as before the call
+      }
+    - On empty input: { accepted: false, reason: "empty_sequence", status }
+    - On parse error mid-sequence: {
+        accepted: false,
+        reason: "parse_error",
+        parse_error: str,
+        failed_at_index: int,        # 0-based into uci_sequence
+        failed_uci: str,
+        status: Status,              # unchanged
+      }
+    - On illegal move mid-sequence: {
+        accepted: false,
+        reason: "illegal",
+        failed_at_index: int,
+        failed_uci: str,
+        expected_turn: "white" | "black",  # whose turn on the COPY when the move failed
+        status: Status,              # unchanged
+      }
+
+    Notes:
+    - Atomicity is structural: this tool operates on board.copy() and
+      discards it. self.board is never mutated, so even mid-sequence
+      failures leave the server state byte-identical to before the call.
+    - UCI only. SAN input is out of scope (see add_move for a per-move
+      entry point; load_pgn for bulk SAN).
+    - No length cap on uci_sequence; the MCP transport limits payload
+      size long before python-chess cares.
+    - This tool validates and reports facts; it does not suggest or score
+      moves. No evaluation, no "best continuation" field.
+    """
+
+    outcome = _GAME.peek(uci_sequence)
+    response: Dict[str, Any] = {
+        "accepted": bool(outcome.get("accepted")),
+        "status": _GAME.status(),   # always the unchanged original
+    }
+    if not response["accepted"]:
+        response["reason"] = outcome["reason"]
+        # Copy through any reason-specific detail fields.
+        for key in ("parse_error", "failed_at_index", "failed_uci", "expected_turn"):
+            if key in outcome:
+                response[key] = outcome[key]
+        return response
+
+    response["peeked_status"] = outcome["peeked_status"]
+    response["applied"] = outcome["applied"]
     return response
 
 

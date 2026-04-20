@@ -642,3 +642,189 @@ async def test_undo_last_move_after_load_pgn():
         out3 = resp3.structuredContent["result"]
         assert out3["accepted"] is False
         assert out3["reason"] == "no_moves"
+
+
+@pytest.mark.anyio
+async def test_peek_empty_sequence_rejected():
+    async with run_client() as session:
+        tools = await session.list_tools()
+        names = {t.name for t in tools.tools}
+        assert "peek" in names
+
+        await session.call_tool("create_or_reset_game", {})
+
+        resp = await session.call_tool("peek", {"uci_sequence": []})
+        out = resp.structuredContent["result"]
+
+        assert out["accepted"] is False
+        assert out["reason"] == "empty_sequence"
+
+        # Atomicity: status in the response is the unchanged starting position.
+        status = out["status"]
+        assert status["ply_count"] == 0
+        assert status["side_to_move"] == "white"
+        assert status["last_move_san"] is None
+
+
+@pytest.mark.anyio
+async def test_peek_parse_error_preserves_state():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        await session.call_tool("add_move", {"uci": "e2e4"})
+
+        resp = await session.call_tool(
+            "peek", {"uci_sequence": ["not-a-move"]}
+        )
+        out = resp.structuredContent["result"]
+
+        assert out["accepted"] is False
+        assert out["reason"] == "parse_error"
+        assert out["failed_at_index"] == 0
+        assert out["failed_uci"] == "not-a-move"
+        assert out.get("parse_error")  # present and non-empty
+
+        # Atomicity: the server-side state still reflects 1. e4 only.
+        status = out["status"]
+        assert status["last_move_san"] == "e4"
+        assert status["ply_count"] == 1
+        assert status["side_to_move"] == "black"
+
+
+@pytest.mark.anyio
+async def test_peek_illegal_move_preserves_state():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        await session.call_tool("add_move", {"uci": "e2e4"})
+
+        # Capture full status before peek; we'll assert full equality after.
+        before = (
+            await session.call_tool("get_status", {})
+        ).structuredContent["result"]
+
+        # White trying to move again when it's Black's turn on the copy.
+        resp = await session.call_tool(
+            "peek", {"uci_sequence": ["e2e4"]}
+        )
+        out = resp.structuredContent["result"]
+
+        assert out["accepted"] is False
+        assert out["reason"] == "illegal"
+        assert out["failed_at_index"] == 0
+        assert out["failed_uci"] == "e2e4"
+        assert out["expected_turn"] == "black"
+
+        # Atomicity: status in the response == status before the peek call.
+        assert out["status"] == before
+
+
+@pytest.mark.anyio
+async def test_peek_multi_ply_happy_path():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+
+        resp = await session.call_tool(
+            "peek",
+            {"uci_sequence": ["e2e4", "e7e5", "g1f3"]},
+        )
+        out = resp.structuredContent["result"]
+
+        assert out["accepted"] is True
+
+        peeked = out["peeked_status"]
+        assert peeked["ply_count"] == 3
+        assert peeked["last_move_san"] == "Nf3"
+        assert peeked["last_move_uci"] == "g1f3"
+        assert peeked["side_to_move"] == "black"
+
+        assert out["applied"] == [
+            {"uci": "e2e4", "san": "e4", "ply": 1, "side": "white"},
+            {"uci": "e7e5", "san": "e5", "ply": 2, "side": "black"},
+            {"uci": "g1f3", "san": "Nf3", "ply": 3, "side": "white"},
+        ]
+
+        # Server-side state is untouched — still the starting position.
+        status = out["status"]
+        assert status["ply_count"] == 0
+        assert status["side_to_move"] == "white"
+        assert status["last_move_san"] is None
+
+
+@pytest.mark.anyio
+async def test_peek_restores_state_after_success():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        await session.call_tool("add_move", {"uci": "e2e4"})
+
+        before = (
+            await session.call_tool("get_status", {})
+        ).structuredContent["result"]
+
+        resp = await session.call_tool(
+            "peek", {"uci_sequence": ["e7e5", "g1f3"]}
+        )
+        assert resp.structuredContent["result"]["accepted"] is True
+
+        after = (
+            await session.call_tool("get_status", {})
+        ).structuredContent["result"]
+
+        # Full Status equality: every field — FEN, castling, ep square,
+        # halfmove clock, pieces map, check flags, material — must match.
+        assert after == before
+
+
+@pytest.mark.anyio
+async def test_peek_after_load_pgn():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+
+        # Scholar's Mate opening moves (not the full mate, just the first 3 plies).
+        pgn = "1. e4 e5 2. Bc4 *"
+        load = await session.call_tool("load_pgn", {"pgn": pgn})
+        assert load.structuredContent["result"]["accepted"] is True
+        assert load.structuredContent["result"]["status"]["ply_count"] == 3
+
+        before = (
+            await session.call_tool("get_status", {})
+        ).structuredContent["result"]
+
+        # Peek a continuation (black develops, white brings out the queen).
+        resp = await session.call_tool(
+            "peek", {"uci_sequence": ["b8c6", "d1h5"]}
+        )
+        out = resp.structuredContent["result"]
+
+        assert out["accepted"] is True
+        peeked = out["peeked_status"]
+        assert peeked["ply_count"] == 5
+        assert peeked["last_move_san"] == "Qh5"
+
+        # applied list contains ONLY the peek moves, not the PGN moves.
+        assert len(out["applied"]) == 2
+        assert [a["uci"] for a in out["applied"]] == ["b8c6", "d1h5"]
+        assert out["applied"][0]["ply"] == 4
+        assert out["applied"][1]["ply"] == 5
+
+        # Server state is still the post-PGN position.
+        assert out["status"] == before
+
+
+@pytest.mark.anyio
+async def test_peek_does_not_affect_undo():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        await session.call_tool("add_move", {"uci": "e2e4"})
+
+        # Peek a continuation; server-side move_stack must be untouched.
+        await session.call_tool(
+            "peek", {"uci_sequence": ["e7e5", "g1f3"]}
+        )
+
+        # Undo should pop the REAL last move (e2e4), not anything from peek.
+        undo = await session.call_tool("undo_last_move", {})
+        undo_out = undo.structuredContent["result"]
+
+        assert undo_out["accepted"] is True
+        assert undo_out["undone"]["uci"] == "e2e4"
+        assert undo_out["undone"]["san"] == "e4"
+        assert undo_out["status"]["ply_count"] == 0
