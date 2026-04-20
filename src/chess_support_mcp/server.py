@@ -7,6 +7,9 @@ import chess
 from mcp.server.fastmcp import FastMCP
 
 
+PIECE_KEYS = ("Q", "R", "B", "N", "P")
+
+
 @dataclass
 class GameState:
     """Holds a single in-memory chess game state."""
@@ -55,12 +58,16 @@ class GameState:
     def all_moves_detailed(self) -> List[Dict[str, Any]]:
         details: List[Dict[str, Any]] = []
         for idx, move in enumerate(self.board.move_stack):
-            details.append({
-                "ply": idx + 1,
-                "uci": move.uci(),
-                "san": self.san_history[idx] if idx < len(self.san_history) else None,
-                "side": "white" if idx % 2 == 0 else "black",
-            })
+            details.append(
+                {
+                    "ply": idx + 1,
+                    "uci": move.uci(),
+                    "san": self.san_history[idx]
+                    if idx < len(self.san_history)
+                    else None,
+                    "side": "white" if idx % 2 == 0 else "black",
+                }
+            )
         return details
 
     def last_n_moves(self, n: int) -> List[str]:
@@ -75,12 +82,16 @@ class GameState:
         result: List[Dict[str, Any]] = []
         for idx in range(start, len(self.board.move_stack)):
             move = self.board.move_stack[idx]
-            result.append({
-                "ply": idx + 1,
-                "uci": move.uci(),
-                "san": self.san_history[idx] if idx < len(self.san_history) else None,
-                "side": "white" if idx % 2 == 0 else "black",
-            })
+            result.append(
+                {
+                    "ply": idx + 1,
+                    "uci": move.uci(),
+                    "san": self.san_history[idx]
+                    if idx < len(self.san_history)
+                    else None,
+                    "side": "white" if idx % 2 == 0 else "black",
+                }
+            )
         return result
 
     def ascii_board(self) -> str:
@@ -92,11 +103,30 @@ class GameState:
             mapping[chess.square_name(square)] = piece.symbol()
         return mapping
 
+    def material_counts(self) -> Dict[str, Dict[str, int]]:
+        white = {k: 0 for k in PIECE_KEYS}
+        black = {k: 0 for k in PIECE_KEYS}
+        for piece in self.board.piece_map().values():
+            sym_upper = piece.symbol().upper()
+            if sym_upper == "K":
+                continue
+            if piece.color == chess.WHITE:
+                white[sym_upper] += 1
+            else:
+                black[sym_upper] += 1
+        return {"white": white, "black": black}
+
     def status(self) -> Dict[str, Any]:
         fen = self.board.fen()
         parts = fen.split()
-        last_move_uci = self.board.move_stack[-1].uci() if self.board.move_stack else None
+        last_move_uci = (
+            self.board.move_stack[-1].uci() if self.board.move_stack else None
+        )
         last_move_san = self.san_history[-1] if self.san_history else None
+        material = self.material_counts()
+        material_diff = {
+            k: material["white"][k] - material["black"][k] for k in PIECE_KEYS
+        }
         return {
             "fen": fen,
             "side_to_move": "white" if self.board.turn else "black",
@@ -107,11 +137,19 @@ class GameState:
             "en_passant_square": parts[3] if len(parts) >= 4 else None,
             "last_move_uci": last_move_uci,
             "last_move_san": last_move_san,
-            "who_moved_last": ("white" if (len(self.board.move_stack) - 1) % 2 == 0 else "black") if self.board.move_stack else None,
+            "who_moved_last": (
+                "white" if (len(self.board.move_stack) - 1) % 2 == 0 else "black"
+            )
+            if self.board.move_stack
+            else None,
             "is_check": self.board.is_check(),
             "is_game_over": self.board.is_game_over(),
-            "result": self.board.result(claim_draw=True) if self.board.is_game_over() else None,
+            "result": self.board.result(claim_draw=True)
+            if self.board.is_game_over()
+            else None,
             "pieces": self.pieces_map(),
+            "material": material,
+            "material_diff": material_diff,
         }
 
 
@@ -228,7 +266,9 @@ def list_moves() -> List[str]:
     return _GAME.all_moves()
 
 
-def _format_move_detail(idx: int, move: chess.Move, san_history: List[str]) -> Dict[str, Any]:
+def _format_move_detail(
+    idx: int, move: chess.Move, san_history: List[str]
+) -> Dict[str, Any]:
     return {
         "ply": idx + 1,
         "uci": move.uci(),
@@ -291,9 +331,6 @@ def board_ascii() -> str:
     return _GAME.ascii_board()
 
 
- 
-
-
 def main() -> None:
     """Entry point: run MCP server over stdio."""
 
@@ -302,5 +339,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

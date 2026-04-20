@@ -8,7 +8,9 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 @asynccontextmanager
 async def run_client():
-    server = StdioServerParameters(command="uv", args=["run", "chess-support-mcp"])  # stdio MCP server
+    server = StdioServerParameters(
+        command="uv", args=["run", "chess-support-mcp"]
+    )  # stdio MCP server
     async with stdio_client(server) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -33,6 +35,17 @@ async def test_reset_and_status():
         # Ensure pieces map exists and is non-empty in initial position
         assert isinstance(status["pieces"], dict)
         assert status["pieces"]["a2"] == "P" and status["pieces"]["e1"] == "K"
+
+        # New enriched-status fields (added in this PR)
+        assert isinstance(status["absolute_pins"], list)
+        assert isinstance(status["checkers"], list)
+        assert isinstance(status["material"], dict)
+        assert isinstance(status["material_diff"], dict)
+        assert status["material_diff"] == {"Q": 0, "R": 0, "B": 0, "N": 0, "P": 0}
+        assert status["material"]["white"] == {"Q": 1, "R": 2, "B": 2, "N": 2, "P": 8}
+        assert status["material"]["black"] == {"Q": 1, "R": 2, "B": 2, "N": 2, "P": 8}
+        assert status["checkers"] == []
+        assert status["absolute_pins"] == []
 
         status2 = await session.call_tool("get_status", {})
         s2 = status2.structuredContent["result"]
@@ -70,8 +83,16 @@ async def test_add_move_and_list():
         assert lm.structuredContent["result"] == ["e2e4", "e7e5"]
 
         lmd = await session.call_tool("list_moves_detailed", {})
-        assert lmd.structuredContent["result"][0]["ply"] == 1 and lmd.structuredContent["result"][0]["side"] == "white" and lmd.structuredContent["result"][0]["san"] == "e4"
-        assert lmd.structuredContent["result"][1]["ply"] == 2 and lmd.structuredContent["result"][1]["side"] == "black" and lmd.structuredContent["result"][1]["san"] == "e5"
+        assert (
+            lmd.structuredContent["result"][0]["ply"] == 1
+            and lmd.structuredContent["result"][0]["side"] == "white"
+            and lmd.structuredContent["result"][0]["san"] == "e4"
+        )
+        assert (
+            lmd.structuredContent["result"][1]["ply"] == 2
+            and lmd.structuredContent["result"][1]["side"] == "black"
+            and lmd.structuredContent["result"][1]["san"] == "e5"
+        )
 
         last1 = await session.call_tool("last_moves", {"n": 1})
         assert last1.structuredContent["result"] == ["e7e5"]
@@ -96,3 +117,23 @@ async def test_legality_and_board_ascii():
         assert badr["accepted"] is False and badr["reason"] == "parse_error"
 
 
+@pytest.mark.anyio
+async def test_material_initial():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        s = (await session.call_tool("get_status", {})).structuredContent["result"]
+        assert s["material"]["white"] == {"Q": 1, "R": 2, "B": 2, "N": 2, "P": 8}
+        assert s["material"]["black"] == {"Q": 1, "R": 2, "B": 2, "N": 2, "P": 8}
+        assert s["material_diff"] == {"Q": 0, "R": 0, "B": 0, "N": 0, "P": 0}
+
+
+@pytest.mark.anyio
+async def test_material_after_capture():
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        for uci in ["e2e4", "d7d5", "e4d5"]:
+            await session.call_tool("add_move", {"uci": uci})
+        s = (await session.call_tool("get_status", {})).structuredContent["result"]
+        assert s["material"]["white"]["P"] == 8
+        assert s["material"]["black"]["P"] == 7
+        assert s["material_diff"]["P"] == 1
