@@ -313,3 +313,39 @@ async def test_get_attackers_to_parse_error():
         assert "parse_error" in result
         assert result["white"] == []
         assert result["black"] == []
+
+
+@pytest.mark.anyio
+async def test_material_after_promotion():
+    # 12-ply forcing line where Black's h-pawn marches to h1 with captures
+    # and promotes to a queen. After 6...gxh1=Q, Black has 2 queens.
+    # Verifies material counts don't silently cap at starting-position
+    # maxima (promotion can legally produce >1 queen per side).
+    async with run_client() as session:
+        await session.call_tool("create_or_reset_game", {})
+        moves = [
+            "e2e4",
+            "h7h5",
+            "e4e5",
+            "h5h4",
+            "e5e6",
+            "d7e6",
+            "d2d4",
+            "h4h3",
+            "d4d5",
+            "h3g2",
+            "d5e6",
+            "g2h1q",
+        ]
+        for uci in moves:
+            resp = await session.call_tool("add_move", {"uci": uci})
+            assert resp.structuredContent["result"]["accepted"] is True, (
+                f"Move {uci} unexpectedly rejected; check the line"
+            )
+        s = (await session.call_tool("get_status", {})).structuredContent["result"]
+        # Black now has 2 queens (original Qd8 + promoted queen on h1).
+        assert s["material"]["black"]["Q"] == 2, (
+            f"Expected 2 black queens after promotion, got {s['material']['black']['Q']}"
+        )
+        # White has 1 queen, black has 2, so diff = -1.
+        assert s["material_diff"]["Q"] == -1
