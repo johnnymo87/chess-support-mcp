@@ -4,6 +4,7 @@ An MCP server that manages the state of a chess game for LLMs/agents. It intenti
 
 - Create/reset game
 - Add a move (UCI)
+- Undo the most recent move
 - Load a full PGN (SAN, with optional start-position header) atomically
 - List all moves
 - Get last N moves
@@ -133,6 +134,7 @@ Claude Desktop configuration (in its JSON settings), using `mcpServers`:
 - `create_or_reset_game()` → Reset to initial position. Returns `status` (with `pieces` map), and `moves`.
 - `get_status()` → Returns FEN; `side_to_move` (white/black); `fullmove_number`; `halfmove_clock`; `ply_count`; `last_move_uci`; `last_move_san`; `who_moved_last`; check flags; `is_game_over`; `result` when over; a `pieces` map for machine reasoning; `checkers` (list of `{square, piece}` for pieces giving check); `absolute_pins` (list of pin objects, each with `color`, `pinned_square`, `pinned_piece`, `king_square`, `pinner_square`, `pinner_piece`, and `ray` ordered from king outward); `material` (per-color piece counts `{Q,R,B,N,P}`, excluding kings, uncapped for promotions); and `material_diff` (per-piece `white[k] - black[k]`).
 - `add_move(uci: str)` → Apply a move if legal (e.g., `e2e4`, `g1f3`, promotion like `e7e8q`). Returns `{ accepted, status }` and, on success, also `moves` and `moves_detailed`. On failure returns `{ accepted:false, reason:"illegal"|"parse_error", expected_turn? }` with `status` reflecting the unchanged position.
+- `undo_last_move()` → Pop the most recent move off the stack. On success returns `{ accepted:true, status, moves, moves_detailed, undone:{uci, san, ply, side} }` with the position reverted. On an empty stack returns `{ accepted:false, reason:"no_moves", status }`. Uses python-chess `board.pop()`, which restores castling rights, en-passant square, halfmove clock, and check flags exactly. Can unwind moves that were replayed by `load_pgn` — the floor is whatever starting position the PGN declared.
 - `load_pgn(pgn: str)` → Replace the current game by replaying a full PGN string. Atomic: the current game is only replaced on full success; any failure (unparseable PGN, illegal SAN mid-stream, empty movetext) leaves the prior game untouched. Respects `[FEN "..."]` start-position headers (the `[SetUp "1"]` header is recognized but not required). Variations inside parentheses are ignored — only the mainline is played. Returns `{ accepted, moves_applied, starting_fen, status, moves, moves_detailed, headers }` on success, or `{ accepted:false, reason:"parse_error"|"empty_pgn"|"illegal_move", parse_error?, moves_applied:0, status }` on failure.
 - `is_legal(uci: str)` → Check legality of a UCI move in the current position.
 - `list_legal_moves_detailed()` → All legal moves in the current position as `[{uci, san}, ...]`, sorted by UCI ascending. Empty list in checkmate or stalemate.
